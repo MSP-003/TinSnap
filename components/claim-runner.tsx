@@ -3,9 +3,6 @@
 import { useEffect, useRef } from "react";
 import Link from "next/link";
 import {
-  Play,
-  Pause,
-  SkipForward,
   CircleCheck as CheckCircle2,
   ExternalLink,
   CircleAlert as AlertCircle,
@@ -14,6 +11,8 @@ import {
   Puzzle,
   ChevronDown,
   Ban,
+  SkipForward,
+  RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -29,15 +28,24 @@ import { useAppStore } from "@/lib/store";
 import { shortenUrl } from "@/lib/url-utils";
 import { ClaimStatus } from "@/lib/types";
 
+function extractCode(item: { codeValue: string | null; claimUrl: string }): string {
+  if (item.codeValue) return item.codeValue;
+  try {
+    const url = new URL(item.claimUrl);
+    return url.searchParams.get("serialNumber") || url.searchParams.get("code") || "";
+  } catch {
+    const match = item.claimUrl.match(/serialNumber=([^&#+]+)/);
+    return match ? match[1] : "";
+  }
+}
+
 function encodeQueue(codes: string[], delayMs: number): string {
   const payload = JSON.stringify({ codes, delayMs });
   return btoa(payload).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function buildFirstUrl(allCodes: string[], delayMs: number): string {
-  const firstCode = allCodes[0];
-  const remaining = allCodes.slice(1);
-  const hash = encodeQueue(remaining, delayMs);
+function buildBatchUrl(firstCode: string, remainingCodes: string[], delayMs: number): string {
+  const hash = encodeQueue(remainingCodes, delayMs);
   return `https://us.zyn.com/ZYNRewards/?serialNumber=${encodeURIComponent(firstCode)}#tinsnap=${hash}`;
 }
 
@@ -86,8 +94,7 @@ export function ClaimRunner() {
           store.updateClaimStatus(item.claimUrl, mapped);
         }
 
-        const currentIdx = store.runner.currentIndex;
-        store.setRunnerIndex(currentIdx + 1);
+        store.setRunnerIndex(store.runner.currentIndex + 1);
       }
 
       if (data.type === "TINSNAP_BATCH_COMPLETE") {
@@ -108,23 +115,9 @@ export function ClaimRunner() {
         claimTabRef.current = null;
         const store = useAppStore.getState();
         store.setClaimTabOpen(false);
-
-        const queue = store.claimQueue;
-        const allDone = queue.every(
-          (q) => q.status !== "pending" && q.status !== "inProgress"
-        );
-
-        if (allDone || store.runner.currentIndex >= queue.length) {
-          store.setBatchStatus("complete");
-        } else {
-          const remaining = queue.filter(
-            (q) => q.status === "pending" || q.status === "inProgress"
-          );
-          remaining.forEach((q) => store.updateClaimStatus(q.claimUrl, "claimed"));
-          store.setBatchStatus("complete");
-        }
+        store.setBatchStatus("complete");
       }
-    }, 1000);
+    }, 1500);
 
     return () => {
       if (pollRef.current) {
@@ -134,25 +127,43 @@ export function ClaimRunner() {
     };
   }, [runner.batchStatus]);
 
+  const resetQueue = () => {
+    const store = useAppStore.getState();
+    store.claimQueue.forEach((q) => {
+      store.updateClaimStatus(q.claimUrl, "pending");
+    });
+    store.setRunnerIndex(0);
+    store.setBatchStatus("idle");
+  };
+
   const startBatch = () => {
     const store = useAppStore.getState();
-    const queue = store.claimQueue;
+    let queue = store.claimQueue;
+
+    if (queue.length === 0) return;
+
+    const hasPending = queue.some(
+      (q) => q.status === "pending" || q.status === "inProgress"
+    );
+    if (!hasPending) {
+      queue.forEach((q) => store.updateClaimStatus(q.claimUrl, "pending"));
+      queue = useAppStore.getState().claimQueue;
+    }
 
     const pendingCodes: string[] = [];
     let firstPendingIdx = -1;
     for (let i = 0; i < queue.length; i++) {
       if (queue[i].status === "pending" || queue[i].status === "inProgress") {
-        if (firstPendingIdx === -1) firstPendingIdx = i;
-        const code =
-          queue[i].codeValue ||
-          new URL(queue[i].claimUrl).searchParams.get("serialNumber") ||
-          "";
-        if (code) pendingCodes.push(code);
+        const code = extractCode(queue[i]);
+        if (code) {
+          if (firstPendingIdx === -1) firstPendingIdx = i;
+          pendingCodes.push(code);
+        }
       }
     }
 
-    if (pendingCodes.length === 0) {
-      store.setBatchStatus("complete");
+    if (pendingCodes.length === 0 || firstPendingIdx === -1) {
+      console.warn("[ClaimRunner] No valid codes found in queue");
       return;
     }
 
@@ -160,12 +171,18 @@ export function ClaimRunner() {
     store.setBatchStatus("running");
     store.updateClaimStatus(queue[firstPendingIdx].claimUrl, "inProgress");
 
-    const url = buildFirstUrl(pendingCodes, store.runner.delayMs);
+    const firstCode = pendingCodes[0];
+    const remainingCodes = pendingCodes.slice(1);
+    const url = buildBatchUrl(firstCode, remainingCodes, store.runner.delayMs);
+
+    console.log("[ClaimRunner] Opening batch URL with", pendingCodes.length, "codes");
+
     const w = window.open(url, "tinsnap-claim");
     if (w) {
       claimTabRef.current = w;
       store.setClaimTabOpen(true);
     } else {
+      console.warn("[ClaimRunner] Popup blocked");
       store.setBatchStatus("idle");
       store.updateClaimStatus(queue[firstPendingIdx].claimUrl, "pending");
     }
@@ -194,9 +211,9 @@ export function ClaimRunner() {
 
   const current = claimQueue[runner.currentIndex];
   const isRunning = runner.batchStatus === "running";
-  const isPaused = runner.batchStatus === "paused";
   const isComplete = runner.batchStatus === "complete";
   const isIdle = runner.batchStatus === "idle";
+  const allTerminal = claimQueue.length > 0 && pendingCount === 0 && inProgressCount === 0;
 
   if (claimQueue.length === 0) {
     return (
@@ -253,7 +270,7 @@ export function ClaimRunner() {
           <span className="text-muted-foreground">{progressPercent}%</span>
         </div>
         <Progress value={progressPercent} className="h-2" />
-        {(isRunning || isPaused || isComplete) && (
+        {(isRunning || isComplete) && (
           <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
             <span>
               Claimed:{" "}
@@ -265,13 +282,17 @@ export function ClaimRunner() {
                 <strong className="text-warning">{alreadyClaimedCount}</strong>
               </span>
             )}
-            <span>
-              Skipped: <strong>{skippedCount}</strong>
-            </span>
-            <span>
-              Failed:{" "}
-              <strong className="text-destructive">{failedCount}</strong>
-            </span>
+            {skippedCount > 0 && (
+              <span>
+                Skipped: <strong>{skippedCount}</strong>
+              </span>
+            )}
+            {failedCount > 0 && (
+              <span>
+                Failed:{" "}
+                <strong className="text-destructive">{failedCount}</strong>
+              </span>
+            )}
             <span>
               Remaining:{" "}
               <strong>{pendingCount + inProgressCount}</strong>
@@ -281,7 +302,7 @@ export function ClaimRunner() {
       </div>
 
       {isComplete && (
-        <div className="rounded-lg border-2 border-success/30 bg-success/5 p-6 text-center space-y-1">
+        <div className="rounded-lg border-2 border-success/30 bg-success/5 p-6 text-center space-y-2">
           <CheckCircle2 className="h-8 w-8 text-success mx-auto mb-2" />
           <p className="font-semibold">Batch Complete</p>
           <p className="text-sm text-muted-foreground">
@@ -292,6 +313,15 @@ export function ClaimRunner() {
             {skippedCount > 0 ? `, skipped ${skippedCount}` : ""}
             {failedCount > 0 ? `, ${failedCount} failed` : ""}
           </p>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={resetQueue}
+            className="gap-1.5 mt-2"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Reset & Run Again
+          </Button>
         </div>
       )}
 
@@ -302,7 +332,7 @@ export function ClaimRunner() {
               #{runner.currentIndex + 1}
             </Badge>
             <span className="text-xs text-muted-foreground">
-              {isRunning ? "Processing..." : isPaused ? "Paused" : ""}
+              {isRunning ? "Processing..." : ""}
             </span>
           </div>
           <p className="font-mono text-sm break-all">
@@ -326,22 +356,24 @@ export function ClaimRunner() {
         </div>
       )}
 
-      {!isComplete && (
+      {!isComplete && !isRunning && (
         <div className="flex flex-col gap-2 sm:flex-row">
-          {isIdle && (
+          <Button
+            onClick={startBatch}
+            className="flex-1 h-12 gap-2 text-base font-semibold"
+          >
+            <Zap className="h-4 w-4" />
+            {allTerminal ? "Retry All Codes" : "Start Auto Claim"}
+          </Button>
+          {allTerminal && (
             <Button
-              onClick={startBatch}
-              className="flex-1 h-12 gap-2 text-base font-semibold"
+              onClick={resetQueue}
+              variant="outline"
+              className="h-12 gap-1.5"
             >
-              <Zap className="h-4 w-4" />
-              Start Auto Claim
+              <RotateCcw className="h-4 w-4" />
+              Reset
             </Button>
-          )}
-          {isRunning && (
-            <p className="text-xs text-muted-foreground text-center py-2">
-              The extension is processing codes in the claim tab. When
-              finished, the tab will close automatically.
-            </p>
           )}
         </div>
       )}
@@ -417,7 +449,7 @@ export function ClaimRunner() {
           <div
             key={q.claimUrl}
             className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              i === runner.currentIndex && !isComplete
+              i === runner.currentIndex && isRunning
                 ? "bg-primary/10 border border-primary/20"
                 : ""
             }`}
@@ -426,7 +458,7 @@ export function ClaimRunner() {
               {i + 1}
             </span>
             <span className="flex-1 truncate font-mono text-xs">
-              {shortenUrl(q.claimUrl, 35)}
+              {q.codeValue || shortenUrl(q.claimUrl, 35)}
             </span>
             {q.status === "claimed" && (
               <CheckCircle2 className="h-4 w-4 text-success flex-shrink-0" />
