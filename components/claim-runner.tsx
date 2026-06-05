@@ -129,63 +129,49 @@ export function ClaimRunner() {
 
   const resetQueue = () => {
     const store = useAppStore.getState();
-    store.claimQueue.forEach((q) => {
-      store.updateClaimStatus(q.claimUrl, "pending");
-    });
+    const reset = store.claimQueue.map((q) => ({ ...q, status: "pending" as ClaimStatus }));
+    store.replaceClaimQueue(reset);
     store.setRunnerIndex(0);
     store.setBatchStatus("idle");
   };
 
   const startBatch = () => {
     const store = useAppStore.getState();
-    let queue = store.claimQueue;
+    const queue = store.claimQueue;
 
     if (queue.length === 0) return;
 
-    const hasPending = queue.some(
-      (q) => q.status === "pending" || q.status === "inProgress"
-    );
-    if (!hasPending) {
-      queue.forEach((q) => store.updateClaimStatus(q.claimUrl, "pending"));
-      queue = useAppStore.getState().claimQueue;
-    }
-
-    const pendingCodes: string[] = [];
-    let firstPendingIdx = -1;
+    const codes: string[] = [];
     for (let i = 0; i < queue.length; i++) {
-      if (queue[i].status === "pending" || queue[i].status === "inProgress") {
-        const code = extractCode(queue[i]);
-        if (code) {
-          if (firstPendingIdx === -1) firstPendingIdx = i;
-          pendingCodes.push(code);
-        }
-      }
+      const code = extractCode(queue[i]);
+      if (code) codes.push(code);
     }
 
-    if (pendingCodes.length === 0 || firstPendingIdx === -1) {
-      console.warn("[ClaimRunner] No valid codes found in queue");
+    if (codes.length === 0) {
+      console.warn("[ClaimRunner] No valid codes in queue");
       return;
     }
 
-    store.setRunnerIndex(firstPendingIdx);
-    store.setBatchStatus("running");
-    store.updateClaimStatus(queue[firstPendingIdx].claimUrl, "inProgress");
-
-    const firstCode = pendingCodes[0];
-    const remainingCodes = pendingCodes.slice(1);
+    const firstCode = codes[0];
+    const remainingCodes = codes.slice(1);
     const url = buildBatchUrl(firstCode, remainingCodes, store.runner.delayMs);
 
-    console.log("[ClaimRunner] Opening batch URL with", pendingCodes.length, "codes");
-
     const w = window.open(url, "tinsnap-claim");
-    if (w) {
-      claimTabRef.current = w;
-      store.setClaimTabOpen(true);
-    } else {
-      console.warn("[ClaimRunner] Popup blocked");
-      store.setBatchStatus("idle");
-      store.updateClaimStatus(queue[firstPendingIdx].claimUrl, "pending");
+    if (!w) {
+      alert("Popup was blocked. Please allow popups for this site and try again.");
+      return;
     }
+
+    claimTabRef.current = w;
+
+    const reset = queue.map((q, i) => ({
+      ...q,
+      status: (i === 0 ? "inProgress" : "pending") as ClaimStatus,
+    }));
+    store.replaceClaimQueue(reset);
+    store.setRunnerIndex(0);
+    store.setBatchStatus("running");
+    store.setClaimTabOpen(true);
   };
 
   const openLoginPage = () => {

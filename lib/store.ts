@@ -31,6 +31,7 @@ interface AppStore {
 
   buildClaimQueue: () => void;
   updateClaimStatus: (claimUrl: string, status: ClaimStatus) => void;
+  replaceClaimQueue: (queue: ClaimQueueItem[]) => void;
   markCurrentClaimed: () => void;
   skipCurrent: () => void;
 
@@ -174,6 +175,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
         q.claimUrl === claimUrl ? { ...q, status } : q
       ),
     }));
+    get().persistToStorage();
+  },
+
+  replaceClaimQueue: (queue) => {
+    set({ claimQueue: queue });
     get().persistToStorage();
   },
 
