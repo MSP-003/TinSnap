@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   CircleCheck as CheckCircle2,
@@ -13,6 +13,7 @@ import {
   Ban,
   SkipForward,
   RotateCcw,
+  TriangleAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -36,7 +37,6 @@ function extractCode(item: { codeValue: string | null; claimUrl: string }): stri
     if (serial) return serial;
     const code = url.searchParams.get("code");
     if (code) return code;
-    // If the URL has any search params, treat the first value as the code
     const firstParam = url.searchParams.entries().next();
     if (firstParam.value) return firstParam.value[1];
     return "";
@@ -51,12 +51,18 @@ export function ClaimRunner() {
   const runner = useAppStore((s) => s.runner);
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  const updateClaimStatus = useAppStore((s) => s.updateClaimStatus);
 
   const mountedRef = useRef(true);
+  const extensionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [statusMessage, setStatusMessage] = useState<{ text: string; variant: "info" | "warning" } | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+      if (extensionTimeoutRef.current) clearTimeout(extensionTimeoutRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -69,6 +75,14 @@ export function ClaimRunner() {
       const store = useAppStore.getState();
 
       if (data.type === "TINSNAP_CLAIM_DONE") {
+        console.log("[ClaimRunner] received TINSNAP_CLAIM_DONE", data);
+
+        if (extensionTimeoutRef.current) {
+          clearTimeout(extensionTimeoutRef.current);
+          extensionTimeoutRef.current = null;
+        }
+        setStatusMessage(null);
+
         const outcome: string = data.outcome || "claimed";
         const code: string = data.code || "";
         const index: number = data.index ?? -1;
@@ -98,6 +112,14 @@ export function ClaimRunner() {
       }
 
       if (data.type === "TINSNAP_BATCH_STATUS") {
+        console.log("[ClaimRunner] received TINSNAP_BATCH_STATUS", data);
+
+        if (extensionTimeoutRef.current) {
+          clearTimeout(extensionTimeoutRef.current);
+          extensionTimeoutRef.current = null;
+        }
+        setStatusMessage(null);
+
         const status: string = data.status;
         const currentIndex: number = data.currentIndex ?? 0;
 
@@ -123,6 +145,7 @@ export function ClaimRunner() {
     store.replaceClaimQueue(reset);
     store.setRunnerIndex(0);
     store.setBatchStatus("idle");
+    setStatusMessage(null);
   };
 
   const startBatch = () => {
@@ -154,10 +177,31 @@ export function ClaimRunner() {
     store.setBatchStatus("running");
     store.setClaimTabOpen(true);
 
+    console.log("[ClaimRunner] startBatch posted", urls.length, "codes");
     window.postMessage(
       { type: "TINSNAP_START_BATCH", urls, delayMs: store.runner.delayMs },
       "*"
     );
+
+    setStatusMessage({ text: "Starting auto-claim, waiting for the TinSnap extension...", variant: "info" });
+
+    if (extensionTimeoutRef.current) clearTimeout(extensionTimeoutRef.current);
+    extensionTimeoutRef.current = setTimeout(() => {
+      if (mountedRef.current) {
+        setStatusMessage({
+          text: "No response from the TinSnap extension. The auto-claim only works on the deployed site with the extension installed and enabled, not in the Bolt preview. Use the manual Open buttons below to claim codes individually.",
+          variant: "warning",
+        });
+      }
+    }, 6000);
+  };
+
+  const toggleManualClaim = (claimUrl: string, currentStatus: ClaimStatus) => {
+    if (currentStatus === "claimed") {
+      updateClaimStatus(claimUrl, "pending");
+    } else {
+      updateClaimStatus(claimUrl, "claimed");
+    }
   };
 
   const openLoginPage = () => {
@@ -207,6 +251,7 @@ export function ClaimRunner() {
           Log in to ZYN Rewards first, then tap Start Auto Claim. The
           extension will process all {claimQueue.length} code
           {claimQueue.length !== 1 ? "s" : ""} in a single tab automatically.
+          You can also open each code manually below.
         </p>
       </div>
 
@@ -242,7 +287,7 @@ export function ClaimRunner() {
           <span className="text-muted-foreground">{progressPercent}%</span>
         </div>
         <Progress value={progressPercent} className="h-2" />
-        {(isRunning || isComplete) && (
+        {(isRunning || isComplete || processedCount > 0) && (
           <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
             <span>
               Claimed: <strong className="text-success">{claimedCount}</strong>
@@ -328,6 +373,23 @@ export function ClaimRunner() {
         </div>
       )}
 
+      {statusMessage && (
+        <div
+          className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${
+            statusMessage.variant === "warning"
+              ? "border-warning/40 bg-warning/5 text-warning"
+              : "border-primary/30 bg-primary/5 text-primary"
+          }`}
+        >
+          {statusMessage.variant === "warning" ? (
+            <TriangleAlert className="h-4 w-4 flex-shrink-0 mt-0.5" />
+          ) : (
+            <Zap className="h-4 w-4 flex-shrink-0 animate-pulse mt-0.5" />
+          )}
+          <span>{statusMessage.text}</span>
+        </div>
+      )}
+
       {isIdle && (
         <div className="flex items-center justify-between rounded-lg border p-3">
           <div className="flex items-center gap-2 min-w-0">
@@ -381,42 +443,69 @@ export function ClaimRunner() {
         </Collapsible>
       )}
 
-      <div className="space-y-1.5 max-h-60 overflow-y-auto">
-        {claimQueue.map((q, i) => (
-          <div
-            key={q.claimUrl}
-            className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
-              i === runner.currentIndex && isRunning
-                ? "bg-primary/10 border border-primary/20"
-                : ""
-            }`}
-          >
-            <span className="w-6 text-xs text-muted-foreground text-right">{i + 1}</span>
-            <span className="flex-1 truncate font-mono text-xs">
-              {q.codeValue || shortenUrl(q.claimUrl, 35)}
-            </span>
-            {q.status === "claimed" && (
-              <CheckCircle2 className="h-4 w-4 text-success flex-shrink-0" />
-            )}
-            {q.status === "already_claimed" && (
-              <Ban className="h-4 w-4 text-warning flex-shrink-0" />
-            )}
-            {q.status === "skipped" && (
-              <SkipForward className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-            )}
-            {q.status === "failed" && (
-              <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0" />
-            )}
-            {q.status === "inProgress" && (
-              <Badge
-                variant="outline"
-                className="text-[10px] h-5 bg-primary/10 text-primary border-primary/20"
+      <div className="space-y-1">
+        <h3 className="text-sm font-semibold text-muted-foreground px-1">
+          Codes ({claimQueue.length})
+        </h3>
+        <div className="space-y-1 max-h-[480px] overflow-y-auto rounded-lg border bg-card p-2">
+          {claimQueue.map((q, i) => {
+            const isDone = q.status === "claimed" || q.status === "already_claimed";
+            return (
+              <div
+                key={q.claimUrl}
+                className={`flex items-center gap-2 rounded-md px-3 py-2.5 text-sm transition-colors ${
+                  i === runner.currentIndex && isRunning
+                    ? "bg-primary/10 border border-primary/20"
+                    : isDone
+                      ? "bg-success/5"
+                      : "hover:bg-muted/50"
+                }`}
               >
-                Active
-              </Badge>
-            )}
-          </div>
-        ))}
+                <span className="w-6 text-xs text-muted-foreground text-right flex-shrink-0">
+                  {i + 1}
+                </span>
+                <span className="flex-1 truncate font-mono text-xs font-medium">
+                  {q.codeValue || shortenUrl(q.claimUrl, 35)}
+                </span>
+
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 flex-shrink-0"
+                  onClick={() => window.open(q.claimUrl, "_blank")}
+                  title="Open claim page"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </Button>
+
+                <Button
+                  variant={isDone ? "default" : "outline"}
+                  size="icon"
+                  className={`h-7 w-7 flex-shrink-0 ${isDone ? "bg-success hover:bg-success/80 text-success-foreground" : ""}`}
+                  onClick={() => toggleManualClaim(q.claimUrl, q.status)}
+                  title={isDone ? "Mark as pending" : "Mark as done"}
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                </Button>
+
+                {q.status === "skipped" && (
+                  <SkipForward className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                )}
+                {q.status === "failed" && (
+                  <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0" />
+                )}
+                {q.status === "inProgress" && (
+                  <Badge
+                    variant="outline"
+                    className="text-[10px] h-5 bg-primary/10 text-primary border-primary/20 flex-shrink-0"
+                  >
+                    Active
+                  </Badge>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
