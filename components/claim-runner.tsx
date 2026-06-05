@@ -58,6 +58,7 @@ export function ClaimRunner() {
   const claimTabRef = useRef<Window | null>(null);
   const mountedRef = useRef(true);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const linkRef = useRef<HTMLAnchorElement | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -136,42 +137,50 @@ export function ClaimRunner() {
   };
 
   const startBatch = () => {
-    const store = useAppStore.getState();
-    const queue = store.claimQueue;
+    try {
+      const store = useAppStore.getState();
+      const queue = store.claimQueue;
 
-    if (queue.length === 0) return;
+      if (queue.length === 0) {
+        alert("No codes in queue. Please scan your photos first.");
+        return;
+      }
 
-    const codes: string[] = [];
-    for (let i = 0; i < queue.length; i++) {
-      const code = extractCode(queue[i]);
-      if (code) codes.push(code);
+      const codes: string[] = [];
+      for (let i = 0; i < queue.length; i++) {
+        const code = extractCode(queue[i]);
+        if (code) codes.push(code);
+      }
+
+      if (codes.length === 0) {
+        alert("Could not extract any valid codes from the queue items.");
+        return;
+      }
+
+      const firstCode = codes[0];
+      const remainingCodes = codes.slice(1);
+      const delayMs = store.runner.delayMs || 4000;
+      const url = buildBatchUrl(firstCode, remainingCodes, delayMs);
+
+      // Use the hidden anchor element to guarantee the click opens a tab
+      if (linkRef.current) {
+        linkRef.current.href = url;
+        linkRef.current.click();
+      } else {
+        window.open(url, "_blank");
+      }
+
+      const reset = queue.map((q, i) => ({
+        ...q,
+        status: (i === 0 ? "inProgress" : "pending") as ClaimStatus,
+      }));
+      store.replaceClaimQueue(reset);
+      store.setRunnerIndex(0);
+      store.setBatchStatus("running");
+      store.setClaimTabOpen(true);
+    } catch (e) {
+      alert("Error starting batch: " + (e instanceof Error ? e.message : String(e)));
     }
-
-    if (codes.length === 0) {
-      console.warn("[ClaimRunner] No valid codes in queue");
-      return;
-    }
-
-    const firstCode = codes[0];
-    const remainingCodes = codes.slice(1);
-    const url = buildBatchUrl(firstCode, remainingCodes, store.runner.delayMs);
-
-    const w = window.open(url, "tinsnap-claim");
-    if (!w) {
-      alert("Popup was blocked. Please allow popups for this site and try again.");
-      return;
-    }
-
-    claimTabRef.current = w;
-
-    const reset = queue.map((q, i) => ({
-      ...q,
-      status: (i === 0 ? "inProgress" : "pending") as ClaimStatus,
-    }));
-    store.replaceClaimQueue(reset);
-    store.setRunnerIndex(0);
-    store.setBatchStatus("running");
-    store.setClaimTabOpen(true);
   };
 
   const openLoginPage = () => {
@@ -213,6 +222,9 @@ export function ClaimRunner() {
 
   return (
     <div className="space-y-5">
+      {/* Hidden anchor used to open tabs without popup blocker issues */}
+      <a ref={linkRef} target="_blank" rel="noopener noreferrer" className="hidden" aria-hidden="true" />
+
       <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-4 space-y-1">
         <h2 className="text-base font-semibold text-primary">
           Batch Rewards Claim Runner
@@ -259,29 +271,23 @@ export function ClaimRunner() {
         {(isRunning || isComplete) && (
           <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
             <span>
-              Claimed:{" "}
-              <strong className="text-success">{claimedCount}</strong>
+              Claimed: <strong className="text-success">{claimedCount}</strong>
             </span>
             {alreadyClaimedCount > 0 && (
               <span>
-                Already Claimed:{" "}
-                <strong className="text-warning">{alreadyClaimedCount}</strong>
+                Already Claimed: <strong className="text-warning">{alreadyClaimedCount}</strong>
               </span>
             )}
             {skippedCount > 0 && (
-              <span>
-                Skipped: <strong>{skippedCount}</strong>
-              </span>
+              <span>Skipped: <strong>{skippedCount}</strong></span>
             )}
             {failedCount > 0 && (
               <span>
-                Failed:{" "}
-                <strong className="text-destructive">{failedCount}</strong>
+                Failed: <strong className="text-destructive">{failedCount}</strong>
               </span>
             )}
             <span>
-              Remaining:{" "}
-              <strong>{pendingCount + inProgressCount}</strong>
+              Remaining: <strong>{pendingCount + inProgressCount}</strong>
             </span>
           </div>
         )}
@@ -293,43 +299,27 @@ export function ClaimRunner() {
           <p className="font-semibold">Batch Complete</p>
           <p className="text-sm text-muted-foreground">
             Claimed {claimedCount}
-            {alreadyClaimedCount > 0
-              ? `, ${alreadyClaimedCount} already claimed`
-              : ""}
+            {alreadyClaimedCount > 0 ? `, ${alreadyClaimedCount} already claimed` : ""}
             {skippedCount > 0 ? `, skipped ${skippedCount}` : ""}
             {failedCount > 0 ? `, ${failedCount} failed` : ""}
           </p>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={resetQueue}
-            className="gap-1.5 mt-2"
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-            Reset & Run Again
-          </Button>
         </div>
       )}
 
-      {current && !isComplete && !isIdle && runner.currentIndex < claimQueue.length && (
+      {current && isRunning && runner.currentIndex < claimQueue.length && (
         <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-4 space-y-2">
           <div className="flex items-center justify-between">
             <Badge className="bg-primary/15 text-primary border-primary/30">
               #{runner.currentIndex + 1}
             </Badge>
-            <span className="text-xs text-muted-foreground">
-              {isRunning ? "Processing..." : ""}
-            </span>
+            <span className="text-xs text-muted-foreground">Processing...</span>
           </div>
           <p className="font-mono text-sm break-all">
             {shortenUrl(current.claimUrl, 60)}
           </p>
           {current.codeValue && (
             <p className="text-xs text-muted-foreground">
-              Code:{" "}
-              <span className="font-mono font-medium">
-                {current.codeValue}
-              </span>
+              Code: <span className="font-mono font-medium">{current.codeValue}</span>
             </p>
           )}
         </div>
@@ -342,16 +332,16 @@ export function ClaimRunner() {
         </div>
       )}
 
-      {!isComplete && !isRunning && (
+      {!isRunning && (
         <div className="flex flex-col gap-2 sm:flex-row">
           <Button
             onClick={startBatch}
             className="flex-1 h-12 gap-2 text-base font-semibold"
           >
             <Zap className="h-4 w-4" />
-            {allTerminal ? "Retry All Codes" : "Start Auto Claim"}
+            {isComplete ? "Run Again" : allTerminal ? "Retry All Codes" : "Start Auto Claim"}
           </Button>
-          {allTerminal && (
+          {(allTerminal || isComplete) && (
             <Button
               onClick={resetQueue}
               variant="outline"
@@ -365,31 +355,24 @@ export function ClaimRunner() {
       )}
 
       {isIdle && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between rounded-lg border p-3">
-            <div className="flex items-center gap-2 min-w-0">
-              <Puzzle className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-              <div className="min-w-0">
-                <p className="text-sm font-medium">Chrome Extension Required</p>
-                <p className="text-xs text-muted-foreground">
-                  Install the TinSnap extension from{" "}
-                  <Link
-                    href="/settings"
-                    className="text-primary underline underline-offset-2"
-                  >
-                    Settings
-                  </Link>{" "}
-                  for auto-claiming to work.
-                </p>
-              </div>
+        <div className="flex items-center justify-between rounded-lg border p-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <Puzzle className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Chrome Extension Required</p>
+              <p className="text-xs text-muted-foreground">
+                Install the TinSnap extension from{" "}
+                <Link href="/settings" className="text-primary underline underline-offset-2">
+                  Settings
+                </Link>{" "}
+                for auto-claiming to work.
+              </p>
             </div>
-            <Switch
-              checked={settings.autoSubmit}
-              onCheckedChange={(checked) =>
-                updateSettings({ autoSubmit: checked })
-              }
-            />
           </div>
+          <Switch
+            checked={settings.autoSubmit}
+            onCheckedChange={(checked) => updateSettings({ autoSubmit: checked })}
+          />
         </div>
       )}
 
@@ -408,18 +391,12 @@ export function ClaimRunner() {
           <CollapsibleContent className="space-y-3 pt-2">
             <div className="space-y-2">
               <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">
-                  Delay between claims
-                </span>
-                <span className="font-medium">
-                  {runner.delayMs / 1000}s
-                </span>
+                <span className="text-muted-foreground">Delay between claims</span>
+                <span className="font-medium">{runner.delayMs / 1000}s</span>
               </div>
               <Slider
                 value={[runner.delayMs]}
-                onValueChange={([v]) =>
-                  useAppStore.getState().setRunnerDelay(v)
-                }
+                onValueChange={([v]) => useAppStore.getState().setRunnerDelay(v)}
                 min={2000}
                 max={15000}
                 step={500}
@@ -440,9 +417,7 @@ export function ClaimRunner() {
                 : ""
             }`}
           >
-            <span className="w-6 text-xs text-muted-foreground text-right">
-              {i + 1}
-            </span>
+            <span className="w-6 text-xs text-muted-foreground text-right">{i + 1}</span>
             <span className="flex-1 truncate font-mono text-xs">
               {q.codeValue || shortenUrl(q.claimUrl, 35)}
             </span>
