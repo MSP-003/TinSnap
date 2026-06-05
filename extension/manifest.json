@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "TinSnap Auto-Submit",
+  "version": "2.0.0",
+  "description": "Auto-submits ZYN Rewards codes when triggered from the TinSnap web app.",
+  "permissions": ["storage", "tabs"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://us.zyn.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["relay.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

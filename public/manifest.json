@@ -1,0 +1,18 @@
+{
+  "name": "TinSnap Claim Helper",
+  "short_name": "TinSnap",
+  "description": "Batch scan QR codes from Zintin photos and process ZYN Rewards claim links.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f8fa",
+  "theme_color": "#0d9488",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

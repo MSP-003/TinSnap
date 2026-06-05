@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>TinSnap</h1>
+      <p class="subtitle">Auto-Submit Extension</p>
+
+      <div class="toggle-row">
+        <span>Enabled</span>
+        <label class="switch">
+          <input type="checkbox" id="enabled" />
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="stats">
+        <div class="stat">
+          <span class="stat-value" id="submitted">0</span>
+          <span class="stat-label">Submitted</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value" id="errors">0</span>
+          <span class="stat-label">Errors</span>
+        </div>
+      </div>
+
+      <p class="hint">
+        Enable "Auto-submit with extension" in TinSnap's Claim Runner, then
+        start claiming. Codes will be entered and submitted automatically.
+      </p>
+
+      <button id="reset">Reset Stats</button>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>
