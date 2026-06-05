@@ -32,21 +32,18 @@ function extractCode(item: { codeValue: string | null; claimUrl: string }): stri
   if (item.codeValue) return item.codeValue;
   try {
     const url = new URL(item.claimUrl);
-    return url.searchParams.get("serialNumber") || url.searchParams.get("code") || "";
+    const serial = url.searchParams.get("serialNumber");
+    if (serial) return serial;
+    const code = url.searchParams.get("code");
+    if (code) return code;
+    // If the URL has any search params, treat the first value as the code
+    const firstParam = url.searchParams.entries().next();
+    if (firstParam.value) return firstParam.value[1];
+    return "";
   } catch {
-    const match = item.claimUrl.match(/serialNumber=([^&#+]+)/);
-    return match ? match[1] : "";
+    const match = item.claimUrl.match(/[?&]([^=]+)=([^&#]+)/);
+    return match ? match[2] : "";
   }
-}
-
-function encodeQueue(codes: string[], delayMs: number): string {
-  const payload = JSON.stringify({ codes, delayMs });
-  return btoa(payload).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function buildBatchUrl(firstCode: string, remainingCodes: string[], delayMs: number): string {
-  const hash = encodeQueue(remainingCodes, delayMs);
-  return `https://us.zyn.com/ZYNRewards/?serialNumber=${encodeURIComponent(firstCode)}#tinsnap=${hash}`;
 }
 
 export function ClaimRunner() {
@@ -55,21 +52,16 @@ export function ClaimRunner() {
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
 
-  const claimTabRef = useRef<Window | null>(null);
   const mountedRef = useRef(true);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const linkRef = useRef<HTMLAnchorElement | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
+    return () => { mountedRef.current = false; };
   }, []);
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
+      if (event.source !== window) return;
       if (!mountedRef.current) return;
       const data = event.data;
       if (!data || !data.type) return;
@@ -77,8 +69,10 @@ export function ClaimRunner() {
       const store = useAppStore.getState();
 
       if (data.type === "TINSNAP_CLAIM_DONE") {
-        const outcome = data.outcome || "claimed";
-        const code = data.code;
+        const outcome: string = data.outcome || "claimed";
+        const code: string = data.code || "";
+        const index: number = data.index ?? -1;
+
         const mapped: ClaimStatus =
           outcome === "claimed"
             ? "claimed"
@@ -88,45 +82,40 @@ export function ClaimRunner() {
                 ? "skipped"
                 : "failed";
 
-        const item = store.claimQueue.find(
-          (q) => q.codeValue === code || q.claimUrl.includes(code)
-        );
-        if (item) {
-          store.updateClaimStatus(item.claimUrl, mapped);
+        const queue = store.claimQueue;
+        if (index >= 0 && index < queue.length) {
+          store.updateClaimStatus(queue[index].claimUrl, mapped);
+        } else if (code) {
+          const item = queue.find(
+            (q) => q.codeValue === code || q.claimUrl.includes(code)
+          );
+          if (item) {
+            store.updateClaimStatus(item.claimUrl, mapped);
+          }
         }
 
-        store.setRunnerIndex(store.runner.currentIndex + 1);
+        store.setRunnerIndex(index + 1);
       }
 
-      if (data.type === "TINSNAP_BATCH_COMPLETE") {
-        store.setBatchStatus("complete");
-        store.setClaimTabOpen(false);
+      if (data.type === "TINSNAP_BATCH_STATUS") {
+        const status: string = data.status;
+        const currentIndex: number = data.currentIndex ?? 0;
+
+        if (status === "running") {
+          store.setBatchStatus("running");
+          store.setRunnerIndex(currentIndex);
+        } else if (status === "paused") {
+          store.setBatchStatus("paused");
+        } else if (status === "complete") {
+          store.setBatchStatus("complete");
+          store.setClaimTabOpen(false);
+        }
       }
     };
 
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
   }, []);
-
-  useEffect(() => {
-    if (runner.batchStatus !== "running") return;
-
-    pollRef.current = setInterval(() => {
-      if (claimTabRef.current && claimTabRef.current.closed) {
-        claimTabRef.current = null;
-        const store = useAppStore.getState();
-        store.setClaimTabOpen(false);
-        store.setBatchStatus("complete");
-      }
-    }, 1500);
-
-    return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    };
-  }, [runner.batchStatus]);
 
   const resetQueue = () => {
     const store = useAppStore.getState();
@@ -137,50 +126,38 @@ export function ClaimRunner() {
   };
 
   const startBatch = () => {
-    try {
-      const store = useAppStore.getState();
-      const queue = store.claimQueue;
+    const store = useAppStore.getState();
+    const queue = store.claimQueue;
 
-      if (queue.length === 0) {
-        alert("No codes in queue. Please scan your photos first.");
-        return;
-      }
-
-      const codes: string[] = [];
-      for (let i = 0; i < queue.length; i++) {
-        const code = extractCode(queue[i]);
-        if (code) codes.push(code);
-      }
-
-      if (codes.length === 0) {
-        alert("Could not extract any valid codes from the queue items.");
-        return;
-      }
-
-      const firstCode = codes[0];
-      const remainingCodes = codes.slice(1);
-      const delayMs = store.runner.delayMs || 4000;
-      const url = buildBatchUrl(firstCode, remainingCodes, delayMs);
-
-      // Use the hidden anchor element to guarantee the click opens a tab
-      if (linkRef.current) {
-        linkRef.current.href = url;
-        linkRef.current.click();
-      } else {
-        window.open(url, "_blank");
-      }
-
-      const reset = queue.map((q, i) => ({
-        ...q,
-        status: (i === 0 ? "inProgress" : "pending") as ClaimStatus,
-      }));
-      store.replaceClaimQueue(reset);
-      store.setRunnerIndex(0);
-      store.setBatchStatus("running");
-      store.setClaimTabOpen(true);
-    } catch (e) {
-      alert("Error starting batch: " + (e instanceof Error ? e.message : String(e)));
+    if (queue.length === 0) {
+      console.warn("[ClaimRunner] No codes in queue");
+      return;
     }
+
+    const urls: string[] = [];
+    for (const item of queue) {
+      const code = extractCode(item);
+      if (code) urls.push(item.claimUrl);
+    }
+
+    if (urls.length === 0) {
+      console.warn("[ClaimRunner] No valid codes found in queue");
+      return;
+    }
+
+    const reset = queue.map((q, i) => ({
+      ...q,
+      status: (i === 0 ? "inProgress" : "pending") as ClaimStatus,
+    }));
+    store.replaceClaimQueue(reset);
+    store.setRunnerIndex(0);
+    store.setBatchStatus("running");
+    store.setClaimTabOpen(true);
+
+    window.postMessage(
+      { type: "TINSNAP_START_BATCH", urls, delayMs: store.runner.delayMs },
+      "*"
+    );
   };
 
   const openLoginPage = () => {
@@ -222,9 +199,6 @@ export function ClaimRunner() {
 
   return (
     <div className="space-y-5">
-      {/* Hidden anchor used to open tabs without popup blocker issues */}
-      <a ref={linkRef} target="_blank" rel="noopener noreferrer" className="hidden" aria-hidden="true" />
-
       <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-4 space-y-1">
         <h2 className="text-base font-semibold text-primary">
           Batch Rewards Claim Runner
