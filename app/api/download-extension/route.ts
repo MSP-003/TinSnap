@@ -88,7 +88,6 @@ export async function GET() {
     "manifest.json",
     "background.js",
     "content.js",
-    "relay.js",
     "popup.html",
     "popup.js",
     "popup.css",

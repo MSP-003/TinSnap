@@ -27,26 +27,41 @@ import {
 } from "@/components/ui/collapsible";
 import { useAppStore } from "@/lib/store";
 import { shortenUrl } from "@/lib/url-utils";
-import { BatchRunnerStatus, ClaimStatus } from "@/lib/types";
+import { ClaimStatus } from "@/lib/types";
+
+function encodeQueue(codes: string[], delayMs: number): string {
+  const payload = JSON.stringify({ codes, delayMs });
+  return btoa(payload).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function buildFirstUrl(allCodes: string[], delayMs: number): string {
+  const firstCode = allCodes[0];
+  const remaining = allCodes.slice(1);
+  const hash = encodeQueue(remaining, delayMs);
+  return `https://us.zyn.com/ZYNRewards/?serialNumber=${encodeURIComponent(firstCode)}#tinsnap=${hash}`;
+}
 
 export function ClaimRunner() {
   const claimQueue = useAppStore((s) => s.claimQueue);
   const runner = useAppStore((s) => s.runner);
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
+
+  const claimTabRef = useRef<Window | null>(null);
   const mountedRef = useRef(true);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       if (!mountedRef.current) return;
-      if (event.source !== window) return;
       const data = event.data;
       if (!data || !data.type) return;
 
@@ -54,7 +69,7 @@ export function ClaimRunner() {
 
       if (data.type === "TINSNAP_CLAIM_DONE") {
         const outcome = data.outcome || "claimed";
-        const idx = data.index;
+        const code = data.code;
         const mapped: ClaimStatus =
           outcome === "claimed"
             ? "claimed"
@@ -64,27 +79,20 @@ export function ClaimRunner() {
                 ? "skipped"
                 : "failed";
 
-        if (idx !== undefined && idx < store.claimQueue.length) {
-          const item = store.claimQueue[idx];
+        const item = store.claimQueue.find(
+          (q) => q.codeValue === code || q.claimUrl.includes(code)
+        );
+        if (item) {
           store.updateClaimStatus(item.claimUrl, mapped);
         }
 
-        const nextIdx = (idx !== undefined ? idx : store.runner.currentIndex) + 1;
-        store.setRunnerIndex(nextIdx);
+        const currentIdx = store.runner.currentIndex;
+        store.setRunnerIndex(currentIdx + 1);
       }
 
-      if (data.type === "TINSNAP_BATCH_STATUS") {
-        if (data.status === "running") {
-          store.setBatchStatus("running");
-          if (data.currentIndex !== undefined) {
-            store.setRunnerIndex(data.currentIndex);
-          }
-        } else if (data.status === "paused") {
-          store.setBatchStatus("paused");
-        } else if (data.status === "complete") {
-          store.setBatchStatus("complete");
-          store.setClaimTabOpen(false);
-        }
+      if (data.type === "TINSNAP_BATCH_COMPLETE") {
+        store.setBatchStatus("complete");
+        store.setClaimTabOpen(false);
       }
     };
 
@@ -92,51 +100,75 @@ export function ClaimRunner() {
     return () => window.removeEventListener("message", handler);
   }, []);
 
+  useEffect(() => {
+    if (runner.batchStatus !== "running") return;
+
+    pollRef.current = setInterval(() => {
+      if (claimTabRef.current && claimTabRef.current.closed) {
+        claimTabRef.current = null;
+        const store = useAppStore.getState();
+        store.setClaimTabOpen(false);
+
+        const queue = store.claimQueue;
+        const allDone = queue.every(
+          (q) => q.status !== "pending" && q.status !== "inProgress"
+        );
+
+        if (allDone || store.runner.currentIndex >= queue.length) {
+          store.setBatchStatus("complete");
+        } else {
+          const remaining = queue.filter(
+            (q) => q.status === "pending" || q.status === "inProgress"
+          );
+          remaining.forEach((q) => store.updateClaimStatus(q.claimUrl, "claimed"));
+          store.setBatchStatus("complete");
+        }
+      }
+    }, 1000);
+
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [runner.batchStatus]);
+
   const startBatch = () => {
     const store = useAppStore.getState();
     const queue = store.claimQueue;
 
-    const pendingUrls: string[] = [];
+    const pendingCodes: string[] = [];
     let firstPendingIdx = -1;
     for (let i = 0; i < queue.length; i++) {
       if (queue[i].status === "pending" || queue[i].status === "inProgress") {
         if (firstPendingIdx === -1) firstPendingIdx = i;
-        pendingUrls.push(queue[i].claimUrl);
+        const code =
+          queue[i].codeValue ||
+          new URL(queue[i].claimUrl).searchParams.get("serialNumber") ||
+          "";
+        if (code) pendingCodes.push(code);
       }
     }
 
-    if (pendingUrls.length === 0) {
+    if (pendingCodes.length === 0) {
       store.setBatchStatus("complete");
       return;
     }
 
     store.setRunnerIndex(firstPendingIdx);
     store.setBatchStatus("running");
-    store.setClaimTabOpen(true);
     store.updateClaimStatus(queue[firstPendingIdx].claimUrl, "inProgress");
 
-    window.postMessage(
-      {
-        type: "TINSNAP_START_BATCH",
-        urls: pendingUrls,
-        delayMs: store.runner.delayMs,
-      },
-      "*"
-    );
-  };
-
-  const pauseBatch = () => {
-    useAppStore.getState().setBatchStatus("paused");
-    window.postMessage({ type: "TINSNAP_PAUSE_BATCH" }, "*");
-  };
-
-  const resumeBatch = () => {
-    useAppStore.getState().setBatchStatus("running");
-    window.postMessage({ type: "TINSNAP_RESUME_BATCH" }, "*");
-  };
-
-  const handleSkip = () => {
-    window.postMessage({ type: "TINSNAP_SKIP_CURRENT" }, "*");
+    const url = buildFirstUrl(pendingCodes, store.runner.delayMs);
+    const w = window.open(url, "tinsnap-claim");
+    if (w) {
+      claimTabRef.current = w;
+      store.setClaimTabOpen(true);
+    } else {
+      store.setBatchStatus("idle");
+      store.updateClaimStatus(queue[firstPendingIdx].claimUrl, "pending");
+    }
   };
 
   const openLoginPage = () => {
@@ -183,9 +215,9 @@ export function ClaimRunner() {
           Batch Rewards Claim Runner
         </h2>
         <p className="text-sm text-muted-foreground">
-          Log in, then tap Start Auto Claim to process all{" "}
-          {claimQueue.length} decoded reward link
-          {claimQueue.length !== 1 ? "s" : ""} automatically.
+          Log in to ZYN Rewards first, then tap Start Auto Claim. The
+          extension will process all {claimQueue.length} code
+          {claimQueue.length !== 1 ? "s" : ""} in a single tab automatically.
         </p>
       </div>
 
@@ -215,7 +247,7 @@ export function ClaimRunner() {
         <div className="flex items-center justify-between text-sm">
           <span className="font-medium">
             {isRunning
-              ? `Processing ${runner.currentIndex + 1} of ${claimQueue.length}`
+              ? `Processing ${Math.min(runner.currentIndex + 1, claimQueue.length)} of ${claimQueue.length}`
               : `${processedCount} of ${claimQueue.length} processed`}
           </span>
           <span className="text-muted-foreground">{progressPercent}%</span>
@@ -287,6 +319,13 @@ export function ClaimRunner() {
         </div>
       )}
 
+      {isRunning && (
+        <div className="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 p-3 text-sm text-primary">
+          <Zap className="h-4 w-4 flex-shrink-0 animate-pulse" />
+          Auto-claiming in progress. Do not close the claim tab.
+        </div>
+      )}
+
       {!isComplete && (
         <div className="flex flex-col gap-2 sm:flex-row">
           {isIdle && (
@@ -299,33 +338,10 @@ export function ClaimRunner() {
             </Button>
           )}
           {isRunning && (
-            <>
-              <Button
-                onClick={pauseBatch}
-                variant="destructive"
-                className="flex-1 h-12 gap-2 text-base"
-              >
-                <Pause className="h-4 w-4" />
-                Pause
-              </Button>
-              <Button
-                onClick={handleSkip}
-                variant="outline"
-                className="h-12 gap-1.5"
-              >
-                <SkipForward className="h-4 w-4" />
-                Skip
-              </Button>
-            </>
-          )}
-          {isPaused && (
-            <Button
-              onClick={resumeBatch}
-              className="flex-1 h-12 gap-2 text-base font-semibold"
-            >
-              <Play className="h-4 w-4" />
-              Resume Auto Claim
-            </Button>
+            <p className="text-xs text-muted-foreground text-center py-2">
+              The extension is processing codes in the claim tab. When
+              finished, the tab will close automatically.
+            </p>
           )}
         </div>
       )}
@@ -336,18 +352,16 @@ export function ClaimRunner() {
             <div className="flex items-center gap-2 min-w-0">
               <Puzzle className="h-4 w-4 text-muted-foreground flex-shrink-0" />
               <div className="min-w-0">
-                <p className="text-sm font-medium">
-                  Auto-submit with extension
-                </p>
+                <p className="text-sm font-medium">Chrome Extension Required</p>
                 <p className="text-xs text-muted-foreground">
-                  Required. Install the Chrome extension from{" "}
+                  Install the TinSnap extension from{" "}
                   <Link
                     href="/settings"
                     className="text-primary underline underline-offset-2"
                   >
                     Settings
                   </Link>{" "}
-                  to enable automatic code submission.
+                  for auto-claiming to work.
                 </p>
               </div>
             </div>
@@ -358,22 +372,6 @@ export function ClaimRunner() {
               }
             />
           </div>
-
-          {settings.autoSubmit && (
-            <div className="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 p-3 text-sm text-primary">
-              <Zap className="h-4 w-4 flex-shrink-0" />
-              The extension will auto-enter codes and handle navigation between
-              claims.
-            </div>
-          )}
-
-          {!settings.autoSubmit && (
-            <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
-              <AlertCircle className="h-4 w-4 flex-shrink-0" />
-              The extension is required for auto-claim. Install it from
-              Settings.
-            </div>
-          )}
         </div>
       )}
 
@@ -404,7 +402,7 @@ export function ClaimRunner() {
                 onValueChange={([v]) =>
                   useAppStore.getState().setRunnerDelay(v)
                 }
-                min={1000}
+                min={2000}
                 max={15000}
                 step={500}
                 className="w-full"

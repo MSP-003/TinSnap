@@ -9,50 +9,123 @@
 
   var params = new URLSearchParams(window.location.search);
   var serialNumber = params.get("serialNumber");
+  var queueData = parseQueue();
+
+  if (!queueData && !serialNumber) {
+    console.log("[TinSnap] No serialNumber and no queue, skipping.");
+    return;
+  }
 
   if (isAlreadyClaimed) {
     console.log("[TinSnap] Already-claimed page detected.");
-    reportResult("already_claimed", serialNumber);
+    finishCode("already_claimed", serialNumber);
     return;
   }
 
   if (!serialNumber) {
-    console.log("[TinSnap] No serialNumber in URL, skipping.");
+    console.log("[TinSnap] No serialNumber, skipping.");
     return;
   }
 
   chrome.storage.local.get("enabled", function (data) {
     if (data.enabled === false) {
       console.log("[TinSnap] Extension disabled.");
-      reportResult("skipped", serialNumber);
+      finishCode("skipped", serialNumber);
       return;
     }
 
-    console.log("[TinSnap] Processing code:", serialNumber);
+    console.log("[TinSnap] Processing code:", serialNumber, "| Queue remaining:", queueData ? queueData.codes.length : 0);
     waitAndProcess(serialNumber);
   });
 
-  function reportResult(outcome, code) {
-    console.log("[TinSnap] Reporting result:", outcome, code);
+  function parseQueue() {
+    var hash = window.location.hash || "";
+    var match = hash.match(/tinsnap=([A-Za-z0-9+/=_-]+)/);
+    if (!match) return null;
+    try {
+      var decoded = atob(match[1].replace(/-/g, "+").replace(/_/g, "/"));
+      var data = JSON.parse(decoded);
+      if (data && Array.isArray(data.codes)) {
+        return data;
+      }
+    } catch (e) {
+      console.warn("[TinSnap] Failed to parse queue from hash:", e);
+    }
+    return null;
+  }
+
+  function buildNextUrl(codes, delayMs) {
+    if (!codes || codes.length === 0) return null;
+    var nextCode = codes[0];
+    var remaining = codes.slice(1);
+    var payload = JSON.stringify({ codes: remaining, delayMs: delayMs || 3000 });
+    var encoded = btoa(payload).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    return "https://us.zyn.com/ZYNRewards/?serialNumber=" + encodeURIComponent(nextCode) + "#tinsnap=" + encoded;
+  }
+
+  function finishCode(outcome, code) {
+    console.log("[TinSnap] Finished:", outcome, code);
+
     chrome.runtime.sendMessage({
-      action: "claimResult",
+      action: outcome === "claimed" ? "claimDone" : "claimError",
       outcome: outcome,
       code: code
     });
+
+    try {
+      if (window.opener) {
+        window.opener.postMessage({
+          type: "TINSNAP_CLAIM_DONE",
+          code: code,
+          outcome: outcome,
+          success: outcome === "claimed"
+        }, "*");
+      }
+    } catch (e) {}
+
+    advanceToNext();
+  }
+
+  function advanceToNext() {
+    if (!queueData || !queueData.codes || queueData.codes.length === 0) {
+      console.log("[TinSnap] Queue empty, closing tab.");
+      try {
+        if (window.opener) {
+          window.opener.postMessage({ type: "TINSNAP_BATCH_COMPLETE" }, "*");
+        }
+      } catch (e) {}
+
+      setTimeout(function () {
+        window.close();
+      }, 800);
+      return;
+    }
+
+    var delayMs = queueData.delayMs || 3000;
+    var nextUrl = buildNextUrl(queueData.codes, delayMs);
+
+    if (!nextUrl) {
+      console.log("[TinSnap] No next URL, closing.");
+      setTimeout(function () { window.close(); }, 800);
+      return;
+    }
+
+    console.log("[TinSnap] Navigating to next code in", delayMs, "ms. Remaining:", queueData.codes.length);
+
+    setTimeout(function () {
+      window.location.href = nextUrl;
+    }, delayMs);
   }
 
   function waitAndProcess(code) {
-    var startTime = Date.now();
-    var maxWait = 15000;
-
     setTimeout(function () {
-      pollForForm(code, startTime, maxWait);
+      pollForForm(code, Date.now(), 18000);
     }, 2000);
   }
 
   function pollForForm(code, startTime, maxWait) {
     if (checkAlreadyClaimed()) {
-      reportResult("already_claimed", code);
+      finishCode("already_claimed", code);
       return;
     }
 
@@ -60,15 +133,15 @@
     var button = input ? findSubmitButton(input) : null;
 
     if (input && button) {
-      console.log("[TinSnap] Found input and button, filling code...");
+      console.log("[TinSnap] Found form elements, filling...");
       fillAndSubmit(input, button, code);
     } else if (Date.now() - startTime < maxWait) {
       setTimeout(function () {
         pollForForm(code, startTime, maxWait);
-      }, 500);
+      }, 600);
     } else {
-      console.warn("[TinSnap] Timed out waiting for form elements");
-      reportResult("timeout", code);
+      console.warn("[TinSnap] Timed out waiting for form.");
+      finishCode("timeout", code);
     }
   }
 
@@ -87,33 +160,30 @@
     for (var i = 0; i < selectors.length; i++) {
       var els = document.querySelectorAll(selectors[i]);
       for (var j = 0; j < els.length; j++) {
-        var el = els[j];
-        if (isVisible(el) && !el.disabled && el.type !== "hidden") {
-          return el;
+        if (isVisible(els[j]) && !els[j].disabled && els[j].type !== "hidden") {
+          return els[j];
         }
       }
     }
 
     var forms = document.querySelectorAll("form");
     for (var k = 0; k < forms.length; k++) {
-      var formInputs = forms[k].querySelectorAll('input[type="text"], input:not([type])');
-      for (var m = 0; m < formInputs.length; m++) {
-        if (isVisible(formInputs[m]) && !formInputs[m].disabled) {
-          return formInputs[m];
+      var inputs = forms[k].querySelectorAll('input[type="text"], input:not([type])');
+      for (var m = 0; m < inputs.length; m++) {
+        if (isVisible(inputs[m]) && !inputs[m].disabled) {
+          return inputs[m];
         }
       }
     }
-
     return null;
   }
 
   function findSubmitButton(input) {
-    var container = input.closest("form") || input.closest("div");
-    var maxDepth = 5;
-    var current = container;
+    var container = input.closest("form") || input.closest("section") || input.parentElement;
+    var depth = 0;
 
-    while (current && maxDepth > 0) {
-      var btns = current.querySelectorAll("button, input[type='submit']");
+    while (container && depth < 6) {
+      var btns = container.querySelectorAll("button, input[type='submit']");
       for (var i = 0; i < btns.length; i++) {
         if (isVisible(btns[i]) && !btns[i].disabled) {
           var text = (btns[i].textContent || "").toLowerCase();
@@ -129,15 +199,12 @@
           return btns[j];
         }
       }
-      current = current.parentElement;
-      maxDepth--;
+      container = container.parentElement;
+      depth++;
     }
 
-    var globalBtn = document.querySelector("button.btn--primary") ||
-      document.querySelector("button[type='submit']");
-    if (globalBtn && isVisible(globalBtn)) return globalBtn;
-
-    return null;
+    return document.querySelector("button.btn--primary") ||
+      document.querySelector("button[type='submit']") || null;
   }
 
   function isVisible(el) {
@@ -145,7 +212,7 @@
     var rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return false;
     var style = window.getComputedStyle(el);
-    return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+    return style.display !== "none" && style.visibility !== "hidden";
   }
 
   function fillAndSubmit(input, button, code) {
@@ -153,32 +220,27 @@
 
     setTimeout(function () {
       input.focus();
+      setInputValue(input, code);
 
       setTimeout(function () {
-        setInputValue(input, code);
+        button.scrollIntoView({ behavior: "instant", block: "center" });
 
         setTimeout(function () {
-          button.scrollIntoView({ behavior: "instant", block: "center" });
-
-          setTimeout(function () {
-            if (button.disabled) {
-              waitForEnabled(button, function () {
-                clickAndWait(button, code);
-              }, function () {
-                reportResult("timeout", code);
-              });
-            } else {
-              clickAndWait(button, code);
-            }
-          }, 300);
-        }, 300);
-      }, 200);
-    }, 300);
+          if (button.disabled) {
+            waitForEnabled(button, function () {
+              clickAndMonitor(button, code);
+            }, function () {
+              finishCode("timeout", code);
+            });
+          } else {
+            clickAndMonitor(button, code);
+          }
+        }, 400);
+      }, 400);
+    }, 400);
   }
 
   function setInputValue(input, value) {
-    input.focus();
-
     var nativeSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, "value"
     );
@@ -187,7 +249,6 @@
     } else {
       input.value = value;
     }
-
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
 
@@ -195,28 +256,25 @@
       input.setAttribute("value", value);
       input.value = value;
       input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
     }
-
-    console.log("[TinSnap] Input value set to:", input.value);
+    console.log("[TinSnap] Input set to:", input.value);
   }
 
-  function waitForEnabled(button, onEnabled, onTimeout) {
+  function waitForEnabled(button, onReady, onTimeout) {
     var attempts = 0;
-    var maxAttempts = 25;
     var iv = setInterval(function () {
       attempts++;
       if (!button.disabled) {
         clearInterval(iv);
-        onEnabled();
-      } else if (attempts >= maxAttempts) {
+        onReady();
+      } else if (attempts > 25) {
         clearInterval(iv);
         onTimeout();
       }
     }, 200);
   }
 
-  function clickAndWait(button, code) {
+  function clickAndMonitor(button, code) {
     console.log("[TinSnap] Clicking submit...");
     button.click();
 
@@ -224,20 +282,20 @@
     var phase = "waitDisable";
     var retried = false;
 
-    var checkIv = setInterval(function () {
+    var iv = setInterval(function () {
       if (done) return;
 
       if (checkAlreadyClaimed()) {
         done = true;
-        clearInterval(checkIv);
-        reportResult("already_claimed", code);
+        clearInterval(iv);
+        finishCode("already_claimed", code);
         return;
       }
 
       if (checkSuccess()) {
         done = true;
-        clearInterval(checkIv);
-        reportResult("claimed", code);
+        clearInterval(iv);
+        finishCode("claimed", code);
         return;
       }
 
@@ -245,21 +303,20 @@
         phase = "waitReenable";
       } else if (phase === "waitReenable" && !button.disabled) {
         done = true;
-        clearInterval(checkIv);
+        clearInterval(iv);
         setTimeout(function () {
           if (checkAlreadyClaimed()) {
-            reportResult("already_claimed", code);
+            finishCode("already_claimed", code);
           } else {
-            reportResult("claimed", code);
+            finishCode("claimed", code);
           }
-        }, 800);
+        }, 1000);
       }
     }, 300);
 
     setTimeout(function () {
       if (!done && !retried && phase === "waitDisable") {
         retried = true;
-        console.log("[TinSnap] Retrying click...");
         button.click();
       }
     }, 2500);
@@ -267,13 +324,11 @@
     setTimeout(function () {
       if (!done) {
         done = true;
-        clearInterval(checkIv);
+        clearInterval(iv);
         if (checkAlreadyClaimed()) {
-          reportResult("already_claimed", code);
-        } else if (checkSuccess()) {
-          reportResult("claimed", code);
+          finishCode("already_claimed", code);
         } else {
-          reportResult("claimed", code);
+          finishCode("claimed", code);
         }
       }
     }, 10000);
