@@ -1,16 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import {
-  CheckCircle2,
-  Copy,
-  ExternalLink,
-  Filter,
-  Download,
-  XCircle,
-  AlertTriangle,
-  CopyCheck,
-} from "lucide-react";
+import { CircleCheck as CheckCircle2, Copy, ExternalLink, Filter, Download, FileSpreadsheet, Circle as XCircle, TriangleAlert as AlertTriangle, CopyCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -112,6 +103,101 @@ export function ResultsList() {
     );
   };
 
+  const handleExportExcel = async () => {
+    try {
+      const decoded = Object.values(results).filter(
+        (r) => r.status === "decoded" && r.claimUrl
+      );
+      const ExcelJS = (await import("exceljs")).default;
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Claim Codes", {
+        views: [{ state: "frozen", ySplit: 2 }],
+      });
+
+      ws.columns = [
+        { width: 6 },
+        { width: 30 },
+        { width: 16 },
+        { width: 22 },
+      ];
+
+      // Row 1: Title
+      ws.mergeCells("A1:D1");
+      const titleCell = ws.getCell("A1");
+      titleCell.value = `TinSnap Rewards Codes (exported ${new Date().toLocaleDateString()})`;
+      titleCell.font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
+      titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF0F172A" } };
+      titleCell.alignment = { horizontal: "left", vertical: "middle" };
+      ws.getRow(1).height = 28;
+
+      // Row 2: Headers
+      const headers = ["#", "Code", "Status", "Claim Link"];
+      const headerRow = ws.getRow(2);
+      headers.forEach((h, i) => {
+        const cell = headerRow.getCell(i + 1);
+        cell.value = h;
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1E293B" } };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        cell.border = { bottom: { style: "thin", color: { argb: "FF334155" } } };
+      });
+      headerRow.height = 22;
+
+      // Data rows
+      decoded.forEach((r, idx) => {
+        const rowNum = idx + 3;
+        const row = ws.getRow(rowNum);
+        row.height = 20;
+
+        const isZebra = idx % 2 === 1;
+        const zebraFill = isZebra
+          ? { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: "FFF1F5F9" } }
+          : undefined;
+
+        // Column A: index
+        const cellA = row.getCell(1);
+        cellA.value = idx + 1;
+        cellA.alignment = { horizontal: "center", vertical: "middle" };
+        if (zebraFill) cellA.fill = zebraFill;
+
+        // Column B: code
+        const cellB = row.getCell(2);
+        cellB.value = r.codeValue || "";
+        cellB.alignment = { vertical: "middle" };
+        if (zebraFill) cellB.fill = zebraFill;
+
+        // Column C: status
+        const cellC = row.getCell(3);
+        cellC.value = r.status;
+        cellC.alignment = { horizontal: "center", vertical: "middle" };
+        if (zebraFill) cellC.fill = zebraFill;
+
+        // Column D: hyperlink button
+        const cellD = row.getCell(4);
+        cellD.value = { text: "Open Claim Page", hyperlink: r.claimUrl! };
+        cellD.font = { bold: true, color: { argb: "FFFFFFFF" }, underline: false };
+        cellD.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2563EB" } };
+        cellD.alignment = { horizontal: "center", vertical: "middle" };
+        cellD.border = {
+          top: { style: "thin", color: { argb: "FF1D4ED8" } },
+          bottom: { style: "thin", color: { argb: "FF1D4ED8" } },
+          left: { style: "thin", color: { argb: "FF1D4ED8" } },
+          right: { style: "thin", color: { argb: "FF1D4ED8" } },
+        };
+      });
+
+      ws.autoFilter = "A2:D2";
+
+      const buffer = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      downloadBlob(blob, "tinsnap-claims.xlsx");
+    } catch (e) {
+      console.error("[ResultsList] Excel export failed:", e);
+    }
+  };
+
   if (Object.keys(results).length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -172,6 +258,15 @@ export function ResultsList() {
           >
             <Download className="h-3.5 w-3.5" />
             CSV
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExportExcel}
+            className="gap-1.5"
+          >
+            <FileSpreadsheet className="h-3.5 w-3.5" />
+            Excel
           </Button>
           <Button
             variant="outline"
@@ -307,6 +402,17 @@ function ResultCard({
 
 function downloadFile(content: string, filename: string, type: string) {
   const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
